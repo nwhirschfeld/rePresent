@@ -1,0 +1,76 @@
+#!/usr/bin/env ruby
+
+require 'net/ssh'
+require 'net/sftp'
+require 'json'
+require 'erb' # ERB Templating engine
+
+require './lib/rmLines.rb'
+require './lib/rmSVG.rb'
+
+document_dir = '.local/share/remarkable/xochitl/'
+
+def get_uuids(ssh, document_dir = '.local/share/remarkable/xochitl/')
+  uuids = ssh.sftp.dir.entries(document_dir).map(&:name)
+  uuids = uuids.reject { |l| l.include? '.' }
+  uuids.map do |uuid|
+    { uuid: uuid,
+      content: \
+        JSON.parse(ssh.sftp.download!("#{document_dir}/#{uuid}.content")),
+      metadata: \
+        JSON.parse(ssh.sftp.download!("#{document_dir}/#{uuid}.metadata")) }
+  end
+end
+
+def get_notebook_uuids(ssh, document_dir = '.local/share/remarkable/xochitl')
+  uuids = get_uuids(ssh, document_dir)
+  uuids.select do |uuid|
+    begin
+      uuid[:content]['fileType'].empty?
+    rescue StandardError
+      false
+    end
+  end
+end
+
+def select_notebook(ssh)
+  # load libary from reMarkable
+  uuids = get_notebook_uuids(ssh)
+
+  # ask user which document to load from reMarkable
+  puts 'Select notebook:'
+  default = 0
+  uuids.each_with_index do |uuid, index|
+    puts "[#{index}] #{uuid[:metadata]['visibleName']}"
+  end
+  print "(default = #{default}) > "
+  /^(?<input>\d+)$/ =~ gets
+  return uuids[input.to_i] if input
+  uuids[default]
+end
+
+def build_presentation(content)
+  b = binding
+  b.local_variable_set(:content, content.map do |a|
+    a.map do |x|
+      name = "#{SecureRandom.uuid}.svg"
+      File.write("./output/rmImage/#{name}", x)
+      name
+    end
+  end)
+  index = ERB.new(File.read('./template/index.erb')).result(b)
+  File.write('./output/index.html', index)
+end
+
+Net::SSH.start('remarkable', 'root', config: true) do |ssh|
+  uuid = select_notebook(ssh)
+
+  content = ssh.sftp.dir
+  content = content.glob("#{document_dir}/#{uuid[:uuid]}", '*.rm')
+  content = content.sort_by(&:name)
+  content = content.map do |fn|
+    content = ssh.sftp.download!("#{document_dir}/#{uuid[:uuid]}/#{fn.name}")
+    toSVGsJoined(parseLines(content))
+  end
+  build_presentation(content)
+end
